@@ -15,7 +15,7 @@ services:
       - ./scripts:/scripts
     environment:
       - JENKINS_OPTS=--httpPort=8080
-      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Xmx2g
+      #- JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Xmx2g
     networks:
       - jenkins-network
     user: root  # Nécessaire pour accéder à Docker socket
