@@ -44,7 +44,7 @@ check_prerequisites() {
     log_success "Docker trouvé: $(docker --version)"
     
     # Docker Compose
-    if ! command -v docker-compose &> /dev/null; then
+    if ! command docker compose version &> /dev/null; then
         log_error "Docker Compose n'est pas installé. Veuillez l'installer d'abord."
         exit 1
     fi
