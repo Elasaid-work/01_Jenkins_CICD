@@ -1,0 +1,303 @@
+pipeline {
+    agent any
+    
+    environment {
+        // Configuration Docker
+        DOCKER_REGISTRY = 'your-registry.com'
+        IMAGE_NAME = 'jenkins-cicd-demo'
+        IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
+        DOCKER_IMAGE = "${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+        
+        // Configuration GitOps
+        GITOPS_REPO = 'https://github.com/your-org/gitops-config.git'
+        GITOPS_BRANCH = 'main'
+        
+        // Outils de sécurité
+        TRIVY_VERSION = '0.45.0'
+        GITLEAKS_VERSION = '8.17.0'
+    }
+    
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+        ansiColor('xterm')
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "🔄 Checking out code..."
+                    checkout scm
+                    env.GIT_COMMIT = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
+                    env.GIT_BRANCH = sh(returnStdout: true, script: 'git rev-parse --abbrev-ref HEAD').trim()
+                }
+            }
+        }
+        
+        stage('Parallel Analysis') {
+            parallel {
+                stage('Lint & Code Quality') {
+                    steps {
+                        script {
+                            echo "🔍 Running ESLint..."
+                            dir('src') {
+                                sh 'npm ci'
+                                sh 'npm run lint'
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            publishHTML([
+                                allowMissing: false,
+                                alwaysLinkToLastBuild: true,
+                                keepAll: true,
+                                reportDir: 'src',
+                                reportFiles: 'eslint-report.html',
+                                reportName: 'ESLint Report'
+                            ])
+                        }
+                    }
+                }
+                
+                stage('Unit Tests') {
+                    steps {
+                        script {
+                            echo "🧪 Running unit tests..."
+                            dir('src') {
+                                sh 'npm ci'
+                                sh 'npm run test:coverage'
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            publishTestResults testResultsPattern: 'src/coverage/junit.xml'
+                            publishCoverage adapters: [istanbulCoberturaAdapter('src/coverage/cobertura-coverage.xml')], sourceFileResolver: sourceFiles('STORE_LAST_BUILD')
+                        }
+                    }
+                }
+                
+                stage('Security Scan - Secrets') {
+                    steps {
+                        script {
+                            echo "🔐 Scanning for secrets with gitleaks..."
+                            sh """
+                                docker run --rm -v \$(pwd):/repo \
+                                    zricethezav/gitleaks:v${GITLEAKS_VERSION} \
+                                    detect --source /repo --report-format json --report-path /repo/gitleaks-report.json || true
+                            """
+                            
+                            // Vérifier si des secrets ont été trouvés
+                            script {
+                                def gitleaksReport = readFile('gitleaks-report.json')
+                                if (gitleaksReport.trim() != '[]' && gitleaksReport.trim() != '') {
+                                    error "🚨 Secrets détectés dans le code ! Vérifiez le rapport gitleaks."
+                                }
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'gitleaks-report.json', allowEmptyArchive: true
+                        }
+                    }
+                }
+                
+                stage('SAST Scan') {
+                    steps {
+                        script {
+                            echo "🛡️ Running SAST analysis..."
+                            // Exemple avec SonarQube ou autre outil SAST
+                            sh """
+                                echo "SAST scan would run here"
+                                # sonar-scanner -Dsonar.projectKey=jenkins-cicd-demo
+                            """
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    echo "🐳 Building Docker image..."
+                    sh """
+                        cd docker
+                        docker build -t ${DOCKER_IMAGE} -f Dockerfile ../
+                        docker tag ${DOCKER_IMAGE} ${DOCKER_REGISTRY}/${IMAGE_NAME}:latest
+                    """
+                }
+            }
+        }
+        
+        stage('Security Scan - Image') {
+            steps {
+                script {
+                    echo "🔍 Scanning Docker image with Trivy..."
+                    sh """
+                        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+                            -v \$(pwd):/workspace \
+                            aquasec/trivy:${TRIVY_VERSION} image \
+                            --format json --output /workspace/trivy-report.json \
+                            --severity HIGH,CRITICAL \
+                            ${DOCKER_IMAGE}
+                    """
+                    
+                    // Analyser le rapport Trivy
+                    script {
+                        def trivyReport = readJSON file: 'trivy-report.json'
+                        def criticalVulns = 0
+                        def highVulns = 0
+                        
+                        if (trivyReport.Results) {
+                            trivyReport.Results.each { result ->
+                                if (result.Vulnerabilities) {
+                                    result.Vulnerabilities.each { vuln ->
+                                        if (vuln.Severity == 'CRITICAL') criticalVulns++
+                                        if (vuln.Severity == 'HIGH') highVulns++
+                                    }
+                                }
+                            }
+                        }
+                        
+                        echo "📊 Vulnérabilités trouvées: ${criticalVulns} CRITICAL, ${highVulns} HIGH"
+                        
+                        // Politique de sécurité: échec si vulnérabilités critiques
+                        if (criticalVulns > 0) {
+                            error "🚨 ${criticalVulns} vulnérabilités CRITICAL détectées ! Build arrêté."
+                        }
+                        
+                        // Avertissement pour les vulnérabilités HIGH
+                        if (highVulns > 5) {
+                            echo "⚠️ Attention: ${highVulns} vulnérabilités HIGH détectées."
+                        }
+                    }
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+        
+        stage('Push to Registry') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'develop'
+                }
+            }
+            steps {
+                script {
+                    echo "📤 Pushing Docker image to registry..."
+                    withCredentials([usernamePassword(credentialsId: 'docker-registry-creds', usernameVariable: 'REGISTRY_USER', passwordVariable: 'REGISTRY_PASS')]) {
+                        sh """
+                            echo \$REGISTRY_PASS | docker login ${DOCKER_REGISTRY} -u \$REGISTRY_USER --password-stdin
+                            docker push ${DOCKER_IMAGE}
+                            docker push ${DOCKER_REGISTRY}/${IMAGE_NAME}:latest
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to Staging') {
+            when {
+                branch 'develop'
+            }
+            steps {
+                script {
+                    echo "🚀 Deploying to staging environment..."
+                    // Mise à jour du manifeste GitOps
+                    sh """
+                        # Clone du repo GitOps
+                        git clone ${GITOPS_REPO} gitops-repo
+                        cd gitops-repo
+                        
+                        # Mise à jour de l'image dans le manifeste staging
+                        sed -i 's|image: .*|image: ${DOCKER_IMAGE}|g' environments/staging/deployment.yaml
+                        
+                        # Commit et push
+                        git config user.name "Jenkins CI"
+                        git config user.email "jenkins@company.com"
+                        git add .
+                        git commit -m "Update staging image to ${IMAGE_TAG}"
+                        git push origin ${GITOPS_BRANCH}
+                    """
+                }
+            }
+        }
+        
+        stage('Deploy to Production') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    echo "🎯 Deploying to production environment..."
+                    // Demande d'approbation pour la production
+                    input message: 'Deploy to production?', ok: 'Deploy',
+                          submitterParameter: 'APPROVER'
+                    
+                    echo "✅ Deployment approved by: ${env.APPROVER}"
+                    
+                    // Mise à jour du manifeste GitOps pour la production
+                    sh """
+                        # Clone du repo GitOps
+                        git clone ${GITOPS_REPO} gitops-repo
+                        cd gitops-repo
+                        
+                        # Mise à jour de l'image dans le manifeste production
+                        sed -i 's|image: .*|image: ${DOCKER_IMAGE}|g' environments/production/deployment.yaml
+                        
+                        # Commit et push
+                        git config user.name "Jenkins CI"
+                        git config user.email "jenkins@company.com"
+                        git add .
+                        git commit -m "Update production image to ${IMAGE_TAG} - Approved by ${env.APPROVER}"
+                        git push origin ${GITOPS_BRANCH}
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                echo "🧹 Cleaning up..."
+                // Nettoyage des images Docker locales
+                sh """
+                    docker rmi ${DOCKER_IMAGE} || true
+                    docker rmi ${DOCKER_REGISTRY}/${IMAGE_NAME}:latest || true
+                    docker system prune -f
+                """
+            }
+        }
+        success {
+            script {
+                echo "✅ Pipeline completed successfully!"
+                // Notification Slack/Teams (exemple)
+                // slackSend channel: '#deployments', 
+                //           message: "✅ ${env.JOB_NAME} - Build #${env.BUILD_NUMBER} deployed successfully"
+            }
+        }
+        failure {
+            script {
+                echo "❌ Pipeline failed!"
+                // Notification d'échec
+                // slackSend channel: '#deployments', 
+                //           color: 'danger',
+                //           message: "❌ ${env.JOB_NAME} - Build #${env.BUILD_NUMBER} failed"
+            }
+        }
+        cleanup {
+            cleanWs()
+        }
+    }
+}
