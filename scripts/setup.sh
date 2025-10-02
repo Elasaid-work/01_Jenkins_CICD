@@ -77,12 +77,7 @@ setup_environment() {
     fi
     
     # Création des répertoires nécessaires
-    mkdir -p 
-        logs,
-        reports,
-        artifacts,
-        nginx,
-        scripts/sql
+    mkdir -p logs reports artifacts nginx scripts/sql
     
     log_success "Répertoires créés"
     
