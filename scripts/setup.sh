@@ -77,13 +77,13 @@ setup_environment() {
     fi
     
     # Création des répertoires nécessaires
-    mkdir -p {
+    mkdir -p 
         logs,
         reports,
         artifacts,
         nginx,
         scripts/sql
-    }
+    
     log_success "Répertoires créés"
     
     # Configuration des permissions
