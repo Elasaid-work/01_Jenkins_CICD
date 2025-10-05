@@ -1,5 +1,10 @@
 pipeline {
-    agent any
+    agent {
+        docker {
+            image 'node:20'
+            args '-v $WORKSPACE:/app -w /app/src'
+        }
+    }
     
     environment {
         // Configuration Docker
