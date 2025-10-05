@@ -44,6 +44,7 @@ pipeline {
                             echo "🔍 Running ESLint..."
                             dir('src') {
                                 sh 'npm ci'
+                                sh 'npm run lint --fix'
                                 sh 'npm run lint'
                             }
                         }
